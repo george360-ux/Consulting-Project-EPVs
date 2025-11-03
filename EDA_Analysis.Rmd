@@ -9,22 +9,294 @@ output: html_document
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
-## R Markdown
+## Load In Packages
 
-This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
-
-When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
-
-```{r cars}
-summary(cars)
+```{r}
+library(readxl)
+library(dplyr)
+library(ggplot2)
+library(boot)
+library(patchwork)
+library(lme4)
+library(lmtest)
+library(broom.mixed)
+library(car)
+library(MatchIt)
+library(mgcv)
+library(gamm4)
+library(broom)
 ```
 
-## Including Plots
+## Read In The DataSet
 
 You can also embed plots, for example:
 
-```{r pressure, echo=FALSE}
-plot(pressure)
+```{r}
+# Read in the dataset
+scattering <- read_excel("~/Downloads/Datasets/caa_all_radii_40um_donut_13Oct2025.xlsx", sheet = "scattering")
+retardance <- read_excel("~/Downloads/Datasets/caa_all_radii_40um_donut_13Oct2025.xlsx", sheet = "retardance")
+orientation <- read_excel("~/Downloads/Datasets/caa_all_radii_40um_donut_13Oct2025.xlsx", sheet = "orientation")
+
+
+scattering$property <- "scattering"
+retardance$property <- "retardance"
+orientation$property <- "orientation"
+
+main_data <- bind_rows(scattering, retardance, orientation)
+
+# Clean variable names for plotting
+main_data$Groups <- factor(main_data$Groups, levels = c("control", "experimental"))
+main_data$Region <- factor(main_data$Region, levels = c("front", "occipital"))
 ```
 
-Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+**Counting**
+
+```{r}
+# Counts per group and region
+main_data %>% 
+  count(Groups, Region) %>% 
+  arrange(desc(n)) %>% 
+  arrange(desc(n))
+
+# Counts per property and group
+main_data %>% 
+  count(property, Groups) %>% 
+  arrange(desc(n))
+```
+
+**Recreate the graphs that was shown in the intake meeting**
+
+```{r}
+# Create summmary (mean +- SE) by group, region, and distance
+summary_df <- main_data %>%
+  group_by(Groups, Region, property, distance) %>%
+  summarise(
+    mean_val = mean(OpticalProperty, na.rm = TRUE),
+    sd_val = sd(OpticalProperty, na.rm = TRUE),
+    n = n(),
+    se = sd_val / sqrt(n),
+    .groups = "drop"
+  )
+# Standarize Region Names
+summary_df <- summary_df %>%
+  mutate(
+    Region = case_when(
+      is.na(Region) ~ "occipital",
+      TRUE ~ as.character(Region)
+    ),
+    Region = factor(Region, levels = c("front", "occipital"))
+  )
+
+
+# Define plot functions 
+plot_property <- function(df, region_filter, property_label) {
+  df %>%
+    filter(property == property_label, Region %in% region_filter) %>%
+    ggplot(aes(x = distance, y = mean_val, color = Groups)) +
+    geom_point(size = 2) +  # keep dots
+    geom_errorbar(aes(ymin = mean_val - se, ymax = mean_val + se), width = 10) +
+    # optional smooth trend line (remove if you want only dots + bars)
+    # geom_smooth(method = "loess", se = FALSE, linetype = "dashed", alpha = 0.4) +
+    scale_color_manual(values = c("black", "red")) +
+    theme_minimal(base_size = 12) +
+    labs(
+      title = paste(paste(region_filter, collapse = " & "), property_label, "vs. Distance"),
+      x = "Distance (µm)",
+      y = property_label
+    )
+}
+
+
+
+# Combined (all regions)
+combined_summary <- summary_df %>%
+  group_by(Groups, distance, property) %>%
+  summarise(
+    mean_val = mean(mean_val, na.rm = TRUE),
+    se = sqrt(sum(se^2, na.rm = TRUE)) / 2,  # conservative SE estimate
+    .groups = "drop"
+  ) %>%
+  mutate(Region = "combined")
+
+
+summary_df_balanced <- bind_rows(summary_df, combined_summary)
+
+
+p_combined_scatt <- plot_property(summary_df_balanced, "combined", "scattering")
+p_combined_ret   <- plot_property(summary_df_balanced, "combined", "retardance")
+p_combined_ori   <- plot_property(summary_df_balanced, "combined", "orientation")
+
+p_front_scatt <- plot_property(summary_df_balanced, "front", "scattering")
+p_front_ret   <- plot_property(summary_df_balanced, "front", "retardance")
+p_front_ori   <- plot_property(summary_df_balanced, "front", "orientation")
+
+p_occ_scatt <- plot_property(summary_df_balanced, "occipital", "scattering")
+p_occ_ret   <- plot_property(summary_df_balanced, "occipital", "retardance")
+p_occ_ori   <- plot_property(summary_df_balanced, "occipital", "orientation")
+
+library(patchwork)
+top_row <- p_combined_scatt + p_combined_ret + p_combined_ori
+mid_row <- p_front_scatt + p_front_ret + p_front_ori
+bottom_row <- p_occ_scatt + p_occ_ret + p_occ_ori
+
+final_plot <- top_row / mid_row / bottom_row +
+  plot_annotation(title = "Optical Properties vs Distance (Mean ± SE)")
+
+final_plot
+```
+
+ssdsd
+
+```{r}
+set.seed(1234)
+main_data <- main_data %>%
+  mutate(
+    Groups = factor(Groups),             # control / experimental
+    subID = factor(subID),
+    distance = as.numeric(distance),
+    OpticalProperty = as.numeric(OpticalProperty),
+    property = factor(property, levels = c("scattering", "retardance", "orientation")),
+    Region = tolower(as.character(Region))
+  )
+
+# Replace NA or blank with occipital, and recode synonyms properly
+main_data <- main_data %>%
+  mutate(
+    Region = case_when(
+      is.na(Region) ~ "occipital",
+      Region %in% c("", "na") ~ "occipital",
+      Region %in% c("front", "frontal") ~ "front",
+      Region %in% c("occ", "occipital") ~ "occipital",
+      TRUE ~ Region
+    ),
+    Region = factor(Region, levels = c("front", "occipital"))
+  )
+
+# Normalize Region factor to two levels: front and occipital
+main_data <- main_data %>% mutate(Region = factor(ifelse(grepl("front", tolower(Region)), "front", "occipital"),
+                                        levels = c("front","occipital")))
+
+block_df <- main_data %>%
+  group_by(subID, Region, Groups, property, distance) %>%
+  summarise(mean_val = mean(OpticalProperty, na.rm = TRUE),
+            n_obs = n(),
+            .groups = "drop")
+
+# Export basic counts for EDA
+counts_table <- main_data %>%
+  group_by(property, Region, Groups) %>%
+  summarise(n_total = n(), n_blocks = n_distinct(subID), .groups = "drop")
+
+
+```
+
+dd
+
+```{r}
+# 4. Global LMM (distance continuous) per property
+#    mean_val ~ Groups * dist_c + (1|subID)
+# -----------------------------
+props <- unique(block_df$property)
+global_results <- list()
+
+for(prop in props){
+  datp <- block_df %>% filter(property == prop)
+  datp <- datp %>% mutate(dist_c = distance - mean(distance, na.rm = TRUE))
+  
+  # Need enough subjects to estimate random effect
+  if(n_distinct(datp$subID) < 4){
+    global_results[[as.character(prop)]] <- tibble(property = prop, model = NA, note = "too few subjects")
+    next
+  }
+  
+  modg <- tryCatch(lmer(mean_val ~ Groups * dist_c + (1 | subID), data = datp, REML = TRUE),
+                   error = function(e) NULL)
+  
+  if(is.null(modg)){
+    global_results[[as.character(prop)]] <- tibble(property = prop, model = "lmer_failed", note = NA)
+  } else {
+    # Save summary and ANOVA to file
+    sm <- summary(modg)
+    an <- anova(modg)
+    sink(file.path("~/Documents/MA 675/Consulting-Project-EPVs", paste0("global_lmm_summary_", prop, ".txt")))
+    print(sm)
+    print(an)
+    sink()
+    
+    # Extract p-values from ANOVA
+    p_group <- if("Groups" %in% rownames(an)) an["Groups", "Pr(>F)"] else NA
+    p_inter <- if("Groups:dist_c" %in% rownames(an)) an["Groups:dist_c", "Pr(>F)"] else NA
+    
+    # Save results to the list
+    global_results[[as.character(prop)]] <- tibble(
+      property = prop,
+      model = "lmer",
+      p_group = p_group,
+      p_interaction = p_inter,
+      note = NA
+    )
+  }
+}
+
+# Combine into a single dataframe
+global_results_df <- bind_rows(global_results)
+
+summary(modg)
+```
+
+```{r}
+# 5. Diagnostics for global LMM (example: for scattering)
+#    Save residuals vs fitted and QQ plots
+# -----------------------------
+diagnostic_plot_fn <- function(mod, label) {
+  # Residuals vs Fitted plot
+  dfres <- data.frame(fitted = fitted(mod), resid = resid(mod))
+  
+  p1 <- ggplot(dfres, aes(x = fitted, y = resid)) +
+    geom_point(alpha = 0.6) +
+    geom_smooth(se = FALSE, method = "loess", color = "blue") +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "red") +
+    labs(
+      title = paste0("Residuals vs Fitted: ", label),
+      x = "Fitted values",
+      y = "Residuals"
+    ) +
+    theme_minimal(base_size = 13)
+  
+  print(p1)  # Display plot interactively
+  
+  # QQ plot (normality of residuals)
+  qq_df <- data.frame(sample = resid(mod))
+  p2 <- ggplot(qq_df, aes(sample = sample)) +
+    stat_qq(alpha = 0.6) +
+    stat_qq_line(color = "red") +
+    labs(
+      title = paste0("QQ Plot: ", label),
+      x = "Theoretical Quantiles",
+      y = "Sample Quantiles"
+    ) +
+    theme_minimal(base_size = 13)
+  
+  print(p2)  # Display QQ plot interactively
+}
+
+# Run diagnostics for each property model if available
+for (prop in props) {
+  message("Showing diagnostics for: ", prop)
+  
+  datp <- block_df %>%
+    filter(property == prop) %>%
+    mutate(dist_c = distance - mean(distance, na.rm = TRUE))
+  
+  modg <- tryCatch(
+    lmer(mean_val ~ Groups * dist_c + (1 | subID), data = datp, REML = TRUE),
+    error = function(e) NULL
+  )
+  
+  if (!is.null(modg)) {
+    diagnostic_plot_fn(modg, paste0("global_", prop))
+  } else {
+    message("Model failed for: ", prop)
+  }
+}
+```
