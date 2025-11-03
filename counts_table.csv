@@ -1,0 +1,13 @@
+"property","Region","Groups","n_total","n_blocks"
+"scattering","front","control",75264,4
+"scattering","front","experimental",4731,4
+"scattering","occipital","control",245446,5
+"scattering","occipital","experimental",5346,5
+"retardance","front","control",75264,4
+"retardance","front","experimental",4731,4
+"retardance","occipital","control",245446,5
+"retardance","occipital","experimental",5346,5
+"orientation","front","control",75264,4
+"orientation","front","experimental",4731,4
+"orientation","occipital","control",245446,5
+"orientation","occipital","experimental",5346,5
