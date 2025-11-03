@@ -1,0 +1,78 @@
+---
+title: "Data analysis"
+format: pdf
+editor: visual
+---
+
+## 1. Read Data
+```{r}
+library(readxl)
+library(dplyr)
+library(ggplot2)
+caa <- read_excel("~/Desktop/MA675/Consulting/caa_all_radii_40um_donut_13Oct2025.xlsx")
+head(caa)
+```
+
+```{r}
+summary(caa)
+```
+
+```{r}
+caa %>% count(Groups, Region)
+```
+First, I checked the data structure. There are measurements for five subjects across frontal and occipital regions, and for both EPVS and normal vessels. The data includes optical values over distances from the vessel boundary.
+
+## 2
+```{r}
+avg_caa <- caa %>%
+  group_by(Groups, Region, distance) %>%
+  summarise(mean_opt = mean(OpticalProperty, na.rm = TRUE),
+            sd_opt = sd(OpticalProperty), .groups="drop")
+
+ggplot(avg_caa, aes(x = distance, y = mean_opt, color = Groups)) +
+  geom_line() +
+  geom_point() +
+  facet_wrap(~Region) +
+  labs(title="Mean Optical Property vs Distance",
+       y="Mean Optical Property",
+       x="Distance (microns)")
+```
+I plotted the mean optical values across distance for EPVS vs normal vessels. We see a general difference between EPVS and healthy vessels, especially in the occipital region. The EPVS curve shows lower values near the boundary, consistent with expected myelin loss.
+
+## 3
+```{r}
+ggplot(caa, aes(x=Groups, y=OpticalProperty, fill=Groups)) +
+  geom_boxplot() +
+  facet_wrap(~Region) +
+  labs(title="Distribution of Optical Property by Region",
+       y="Optical Property", x="")
+```
+
+```{r}
+ggplot(caa, aes(x=subID, y=OpticalProperty, color=Groups)) +
+  geom_point(alpha=0.7) +
+  facet_wrap(~Region) +
+  labs(title="Optical Property by Subject",
+       y="Optical Property", x="Subject")
+```
+
+## Read Data for histology
+```{r}
+hist_mean <- read_excel("~/Desktop/MA675/Consulting/histology_mean_ring_measurements_15-Oct-2025.xlsx")
+head(hist_mean)
+```
+
+```{r}
+hist_mean$distance <- as.numeric(gsub("rad","", hist_mean$radiusValue))
+
+ggplot(hist_mean, aes(x = distance, y = measurement, color = measurementType)) +
+  geom_line() +
+  geom_point() +
+  ggtitle("Histology mean optical property vs distance") +
+  xlab("Distance (um)") +
+  ylab("Mean Optical Value")
+```
+To simplify the visualization, I also plotted the average curve for each group across distances.
+The EPVS curve stays lower than the control curve at most distances, matching the OCT trend.
+
+
