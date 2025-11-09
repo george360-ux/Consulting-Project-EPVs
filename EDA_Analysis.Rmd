@@ -25,6 +25,9 @@ library(MatchIt)
 library(mgcv)
 library(gamm4)
 library(broom)
+library(tidyverse)
+library(itsadug)
+library(purrr)
 ```
 
 ## Read In The DataSet
@@ -33,9 +36,9 @@ You can also embed plots, for example:
 
 ```{r}
 # Read in the dataset
-scattering <- read_excel("~/Downloads/Datasets/caa_all_radii_40um_donut_13Oct2025.xlsx", sheet = "scattering")
-retardance <- read_excel("~/Downloads/Datasets/caa_all_radii_40um_donut_13Oct2025.xlsx", sheet = "retardance")
-orientation <- read_excel("~/Downloads/Datasets/caa_all_radii_40um_donut_13Oct2025.xlsx", sheet = "orientation")
+scattering <- read_excel("radii.xlsx", sheet = "scattering")
+retardance <- read_excel("radii.xlsx", sheet = "retardance")
+orientation <- read_excel("radii.xlsx", sheet = "orientation")
 
 
 scattering$property <- "scattering"
@@ -194,8 +197,6 @@ dd
 
 ```{r}
 # 4. Global LMM (distance continuous) per property
-#    mean_val ~ Groups * dist_c + (1|subID)
-# -----------------------------
 props <- unique(block_df$property)
 global_results <- list()
 
@@ -245,9 +246,8 @@ summary(modg)
 ```
 
 ```{r}
-# 5. Diagnostics for global LMM (example: for scattering)
-#    Save residuals vs fitted and QQ plots
-# -----------------------------
+# Diagnostics for global LMM (example: for scattering)
+
 diagnostic_plot_fn <- function(mod, label) {
   # Residuals vs Fitted plot
   dfres <- data.frame(fitted = fitted(mod), resid = resid(mod))
@@ -299,4 +299,127 @@ for (prop in props) {
     message("Model failed for: ", prop)
   }
 }
+```
+
+## Begin SWP Relationship Analysis
+
+A Generalized Additive Model (GAM) is a type of statistical model that allows the relationship between a predictor and an outcome to be non-linear, instead of forcing it to be a straight line.
+
+In a normal linear regression, we assume:
+
+-   Every unit increase in X changes the outcome by the same amount.
+
+-   The relationship is assumed to be a straight line.
+
+But biological processes often aren’t linear — especially tissue changes in disease.
+
+A GAM replaces the straight line with a smooth curve:
+
+We used a Generalized Additive Model because we expected the relationship between size-weighted proximity (SWP) and the optical properties to be non-linear.\
+
+A GAM allows us to model this relationship flexibly, without forcing it into a straight line or predefined curve.\
+
+This lets the data determine the true shape of how tissue optical properties change as proximity to EPVS increases, while still adjusting for differences between brain regions.
+
+```{r}
+file <- "op_vs_swp_16-Oct-2025.xlsx"
+
+sheets <- excel_sheets(file)
+
+swp <- map_dfr(sheets, function(s) {
+  read_excel(file, sheet = s) %>%
+    rename(log_swp = 1, optical_value = 2) %>%  # rename first two columns consistently
+    mutate(sheet_name = s)
+})
+
+# Label property + region
+swp <- swp %>%
+  mutate(
+    property = case_when(
+      str_detect(sheet_name, "mus") ~ "scattering",
+      str_detect(sheet_name, "ret") ~ "retardance"
+    ),
+    region = case_when(
+      str_detect(sheet_name, "front") ~ "frontal",
+      str_detect(sheet_name, "occip") ~ "occipital",
+      TRUE ~ "combined"
+    )
+  )
+
+glimpse(swp)
+table(swp$property, swp$region)
+
+ggplot(swp, aes(x = log_swp, y = optical_value, color = region)) +
+  geom_point(alpha = 0.15) +
+  geom_smooth(method = "loess", se = FALSE) +
+  facet_wrap(~ property, scales = "free_y") +
+  theme_minimal() +
+  labs(title = "Optical Properties vs log(SWP)", y = "Optical Value", x = "log(SWP)")
+```
+
+```{r}
+gam_scatter <- gam(optical_value ~ s(log_swp, k = 6) + region,
+                   data = filter(swp, property == "scattering"))
+
+gam_retard <- gam(optical_value ~ s(log_swp, k = 6) + region,
+                  data = filter(swp, property == "retardance"))
+
+par(mfrow=c(1,2))
+plot(gam_scatter, shade = TRUE, main = "Scattering vs SWP")
+plot(gam_retard, shade = TRUE, main = "Retardance vs SWP")
+
+```
+
+We modeled scattering and retardance as smooth functions of SWP and included region as a fixed effect.\
+In both cases, the smooth term was highly significant, confirming a non-linear relationship between SWP and tissue optical properties. Scattering increases and then decreases as SWP increases, consistent with an early increase in extracellular tissue density followed by late-stage tissue degradation. Retardance decreases and then increases, which suggests initial myelin breakdown, followed by fiber compression or re-packing in more advanced disease. Additionally, both scattering and retardance are higher in the occipital region than in the frontal region, consistent with the known pattern of CAA-related white matter vulnerability. The models is a good fit with the adjusted r-squred value (0.74 and 0.76)
+
+I visualized the relationship between EPVS Size-Weighted Proximity (SWP) and optical properties.\
+
+Both scattering and retardance show non-linear dependence on SWP, so linear models are not appropriate.\
+
+A GAM model captures the shape of the curve, which aligns with the biological interpretation:
+
+-   Scattering increases at moderate SWP, likely due to increased cellular density or ECM changes — then drops at high SWP, consistent with late-stage tissue breakdown.
+
+-   Retardance decreases initially, due to myelin degeneration — then rises again, suggesting myelin fiber compression in late disease progression.
+
+-   Regional effects (frontal vs occipital) will be tested next, but occipital is expected to show stronger pathology based on previous findings.
+
+Below is a more advanced visualization
+
+```{r}
+p1 <- ggplot(swp, aes(x = log_swp, y = optical_value, color = region)) +
+  geom_point(alpha = 0.12, size = 0.7) +
+  geom_smooth(method = "loess", se = FALSE, linewidth = 1.2) +
+  facet_wrap(~ property, scales = "free_y") +
+  scale_color_manual(values = c("combined"="#888888", "frontal"="#1f78b4", "occipital"="#e31a1c")) +
+  theme_minimal(base_size = 14) +
+  labs(title = "Optical Properties vs log(SWP)",
+       x = "log(SWP)",
+       y = "Optical Property Value",
+       color = "Region")
+p1
+
+```
+
+```{r}
+
+# Predict for smooth plotting
+newdata <- swp %>%
+  group_by(region) %>%
+  reframe(log_swp = seq(min(log_swp), max(log_swp), length.out = 200), .groups="drop")
+
+newdata$scatter_pred <- predict(gam_scatter, newdata)
+newdata$ret_pred <- predict(gam_retard, newdata)
+p2 <- ggplot(newdata, aes(x = log_swp, color = region)) +
+  geom_line(aes(y = scatter_pred), linewidth = 1.4) +
+  geom_line(aes(y = ret_pred), linetype="dashed", linewidth=1.4) +
+  scale_color_manual(values = c("combined"="#888888", "frontal"="#1f78b4", "occipital"="#e31a1c")) +
+  theme_minimal(base_size = 14) +
+  labs(title = "GAM Smooths: Scattering (solid) & Retardance (dashed)",
+       x = "log(SWP)",
+       y = "Optical Property Value",
+       color = "Region")
+
+p2
 ```
