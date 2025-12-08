@@ -2,7 +2,9 @@
 title: "EDA_Analysis"
 author: "George Acostalemus, Chunlin Liu, Sile Wang"
 date: "2025-10-31"
-output: html_document
+output:
+  pdf_document: default
+  html_document: default
 ---
 
 ```{r setup, include=FALSE}
@@ -148,47 +150,8 @@ final_plot <- top_row / mid_row / bottom_row +
 final_plot
 ```
 
-ssdsd
-
 ```{r}
-set.seed(1234)
-main_data <- main_data %>%
-  mutate(
-    Groups = factor(Groups),             # control / experimental
-    subID = factor(subID),
-    distance = as.numeric(distance),
-    OpticalProperty = as.numeric(OpticalProperty),
-    property = factor(property, levels = c("scattering", "retardance", "orientation")),
-    Region = tolower(as.character(Region))
-  )
 
-# Replace NA or blank with occipital, and recode synonyms properly
-main_data <- main_data %>%
-  mutate(
-    Region = case_when(
-      is.na(Region) ~ "occipital",
-      Region %in% c("", "na") ~ "occipital",
-      Region %in% c("front", "frontal") ~ "front",
-      Region %in% c("occ", "occipital") ~ "occipital",
-      TRUE ~ Region
-    ),
-    Region = factor(Region, levels = c("front", "occipital"))
-  )
-
-# Normalize Region factor to two levels: front and occipital
-main_data <- main_data %>% mutate(Region = factor(ifelse(grepl("front", tolower(Region)), "front", "occipital"),
-                                        levels = c("front","occipital")))
-
-block_df <- main_data %>%
-  group_by(subID, Region, Groups, property, distance) %>%
-  summarise(mean_val = mean(OpticalProperty, na.rm = TRUE),
-            n_obs = n(),
-            .groups = "drop")
-
-# Export basic counts for EDA
-counts_table <- main_data %>%
-  group_by(property, Region, Groups) %>%
-  summarise(n_total = n(), n_blocks = n_distinct(subID), .groups = "drop")
 
 
 ```
@@ -197,36 +160,52 @@ dd
 
 ```{r}
 # 4. Global LMM (distance continuous) per property
+library(dplyr)
+library(lme4)
+library(tibble)
+
 props <- unique(block_df$property)
 global_results <- list()
 
-for(prop in props){
+for (prop in props) {
   datp <- block_df %>% filter(property == prop)
   datp <- datp %>% mutate(dist_c = distance - mean(distance, na.rm = TRUE))
   
   # Need enough subjects to estimate random effect
-  if(n_distinct(datp$subID) < 4){
+  if (n_distinct(datp$subID) < 4) {
     global_results[[as.character(prop)]] <- tibble(property = prop, model = NA, note = "too few subjects")
     next
   }
+  # Inlcude weights
+  modg <- tryCatch(
+    lmer(mean_val ~ Groups * dist_c + (1 | subID), data = datp, REML = TRUE),
+    error = function(e) NULL
+  )
   
-  modg <- tryCatch(lmer(mean_val ~ Groups * dist_c + (1 | subID), data = datp, REML = TRUE),
-                   error = function(e) NULL)
-  
-  if(is.null(modg)){
+  if (is.null(modg)) {
     global_results[[as.character(prop)]] <- tibble(property = prop, model = "lmer_failed", note = NA)
   } else {
-    # Save summary and ANOVA to file
     sm <- summary(modg)
     an <- anova(modg)
+    
+    # Display summary & ANOVA in console
+    cat("\n=====================================\n")
+    cat("Model Summary for:", prop, "\n")
+    cat("=====================================\n")
+    print(sm)
+    cat("\n--- ANOVA Table ---\n")
+    print(an)
+    cat("\n\n")
+    
+    # Save summary & ANOVA to text file
     sink(file.path("~/Documents/MA 675/Consulting-Project-EPVs", paste0("global_lmm_summary_", prop, ".txt")))
     print(sm)
     print(an)
     sink()
     
     # Extract p-values from ANOVA
-    p_group <- if("Groups" %in% rownames(an)) an["Groups", "Pr(>F)"] else NA
-    p_inter <- if("Groups:dist_c" %in% rownames(an)) an["Groups:dist_c", "Pr(>F)"] else NA
+    p_group <- if ("Groups" %in% rownames(an)) an["Groups", "Pr(>F)"] else NA
+    p_inter <- if ("Groups:dist_c" %in% rownames(an)) an["Groups:dist_c", "Pr(>F)"] else NA
     
     # Save results to the list
     global_results[[as.character(prop)]] <- tibble(
@@ -239,7 +218,7 @@ for(prop in props){
   }
 }
 
-# Combine into a single dataframe
+# Combine results into a single dataframe
 global_results_df <- bind_rows(global_results)
 
 summary(modg)
@@ -301,25 +280,276 @@ for (prop in props) {
 }
 ```
 
+**REFIT MODEL WITH FACTORING**
+
+```{r}
+
+# Helper to add subject–region block ID
+add_block_id <- function(df) {
+  df %>%
+    mutate(
+      Groups   = factor(Groups),
+      Region   = factor(Region),
+      distance = factor(distance, levels = sort(unique(distance))),
+      block_id = interaction(subID, Region, drop = TRUE)
+    )
+}
+
+# Diagnostics (same style as before)
+plot_diagnostics <- function(mod, label){
+  res <- residuals(mod, type = "pearson")
+  fit <- fitted(mod)
+  dfres <- data.frame(fitted = fit, resid = res)
+
+  p1 <- ggplot(dfres, aes(fitted, resid)) +
+    geom_point(alpha = 0.6) +
+    geom_smooth(method = "loess", se = FALSE) +
+    geom_hline(yintercept = 0, linetype = "dashed") +
+    labs(title = paste("Residuals vs Fitted:", label),
+         x = "Fitted values", y = "Pearson residuals") +
+    theme_minimal(base_size = 12)
+
+  p2 <- ggplot(dfres, aes(sample = resid)) +
+    stat_qq(alpha = 0.6) + stat_qq_line() +
+    labs(title = paste("QQ Plot:", label),
+         x = "Theoretical Quantiles", y = "Sample Quantiles") +
+    theme_minimal(base_size = 12)
+
+  # Explicitly print so they render
+  print(p1)
+  print(p2)
+}
+
+# Main function: fit LME per property (distance as factor)
+fit_factored_lme <- function(block_df,
+                             outdir = "~/Documents/Consulting-Project-EPVS") {
+  dir.create(outdir, showWarnings = FALSE, recursive = TRUE)
+
+  df0 <- add_block_id(block_df)
+  props <- unique(df0$property)
+
+  results <- map(props, function(prop_i) {
+    datp <- df0 %>% filter(property == prop_i) %>% droplevels()
+
+    mod <- tryCatch(
+      lme(
+        fixed   = mean_val ~ Groups * distance,
+        random  = ~1 | subID,                     # subject-level random effect
+        weights = varIdent(form = ~1 | Groups),   # heteroskedasticity by group
+        data    = datp,
+        method  = "REML",
+        na.action = na.omit
+      ),
+      error = function(e) NULL
+    )
+
+    if (is.null(mod)) {
+      return(tibble(property = prop_i, model_status = "failed"))
+    }
+
+    # Save text output
+    sink(file.path(outdir, paste0("lme_factordist_summary_", prop_i, ".txt")))
+    print(summary(mod))
+    cat("\n--- ANOVA ---\n")
+    print(anova(mod))
+    sink()
+
+    # Diagnostics
+    plot_diagnostics(mod, paste("Factored model:", prop_i))
+
+    # Compact p-value extraction
+    an <- anova(mod)
+    p_group <- if ("Groups" %in% rownames(an)) an["Groups", "p-value"] else NA
+    p_inter <- {
+      rn <- rownames(an)
+      idx <- grepl("^Groups:distance", rn)
+      if (any(idx)) an[which(idx)[1], "p-value"] else NA
+    }
+
+    tibble(property = prop_i,
+           model_status = "ok",
+           p_groups = p_group,
+           p_interaction = p_inter)
+  })
+
+  bind_rows(results)
+}
+res_factored <- fit_factored_lme(block_df)
+res_factored
+
+```
+
+```{r}
+set.seed(1234)
+main_data <- main_data %>%
+  mutate(
+    Groups = factor(Groups),             # control / experimental
+    subID = factor(subID),
+    distance = as.numeric(distance),
+    OpticalProperty = as.numeric(OpticalProperty),
+    property = factor(property, levels = c("scattering", "retardance", "orientation")),
+    Region = tolower(as.character(Region))
+  )
+
+# Replace NA or blank with occipital, and recode synonyms properly
+main_data <- main_data %>%
+  mutate(
+    Region = case_when(
+      is.na(Region) ~ "occipital",
+      Region %in% c("", "na") ~ "occipital",
+      Region %in% c("front", "frontal") ~ "front",
+      Region %in% c("occ", "occipital") ~ "occipital",
+      TRUE ~ Region
+    ),
+    Region = factor(Region, levels = c("front", "occipital"))
+  )
+
+# Normalize Region factor to two levels: front and occipital
+main_data <- main_data %>% mutate(Region = factor(ifelse(grepl("front", tolower(Region)), "front", "occipital"),
+                                        levels = c("front","occipital")))
+
+block_df <- main_data %>%
+  group_by(Groups, subID, distance, property) %>%
+  mutate(weight = n()) %>%               # weight = number of samples in that group-distance combo
+  ungroup()
+
+
+
+# Export basic counts for EDA
+counts_table <- main_data %>%
+  group_by(property, Region, Groups) %>%
+  summarise(n_total = n(), n_blocks = n_distinct(subID), .groups = "drop")
+```
+
+\newpage
+
+## Naive Models for Scattering and Retardaance
+
+```{r}
+library(dplyr)
+library(broom)
+library(knitr)
+library(kableExtra)
+
+
+fit_naive_models <- function(df, property_filter) {
+  
+  df_prop <- df %>% filter(property == property_filter)
+  
+  # Model 1: Frontal only
+  m_front <- lm(
+    OpticalProperty ~ Groups * factor(distance),
+    data = df_prop %>% filter(Region == "front")
+  )
+  
+  # Model 2: Occipital only
+  m_occip <- lm(
+    OpticalProperty ~ Groups * factor(distance),
+    data = df_prop %>% filter(Region == "occipital")
+  )
+  
+  # Model 3: Combined regions (Region as covariate)
+  m_combined <- lm(
+    OpticalProperty ~ Groups * factor(distance) + Region,
+    data = df_prop
+  )
+  
+  list(
+    frontal = m_front,
+    occipital = m_occip,
+    combined = m_combined
+  )
+}
+
+make_model_table <- function(model, title){
+  tab <- summary(model)$coefficients %>% 
+    as.data.frame() %>% 
+    mutate(Term = rownames(.)) %>% 
+    select(Term, Estimate = Estimate, Std_Error = `Std. Error`,
+           t_value = `t value`, p_value = `Pr(>|t|)`)
+  
+  kable(tab, caption = title, digits = 4)
+}
+
+
+
+# Run models
+# Run models
+naive_scatter <- fit_naive_models(main_data, "scattering")
+naive_retard  <- fit_naive_models(main_data, "retardance")
+
+# Produce tables
+make_model_table(naive_scatter$frontal,   "Scattering — Frontal Region (Naïve Model)")
+make_model_table(naive_scatter$occipital, "Scattering — Occipital Region (Naïve Model)")
+make_model_table(naive_scatter$combined,  "Scattering — Combined Regions (Naïve Model)")
+
+make_model_table(naive_retard$frontal,    "Retardance — Frontal Region (Naïve Model)")
+make_model_table(naive_retard$occipital,  "Retardance — Occipital Region (Naïve Model)")
+make_model_table(naive_retard$combined,   "Retardance — Combined Regions (Naïve Model)")
+
+
+summary(naive_scatter$frontal)
+summary(naive_scatter$occipital)
+summary(naive_scatter$retardance)
+summary(naive_scatter$frontal)
+summary(naive_scatter$occipital)
+summary(naive_scatter$combined)
+
+library(ggplot2)
+library(dplyr)
+
+# --- Helper function to make a QQ plot ---
+make_qq_plot <- function(model, title){
+  df <- data.frame(resid = residuals(model))
+  
+  ggplot(df, aes(sample = resid)) +
+    stat_qq(size = 1, alpha = 0.6) +
+    stat_qq_line(color = "red", linewidth = 1) +
+    labs(
+      title = paste("QQ Plot:", title),
+      x = "Theoretical Quantiles",
+      y = "Sample Quantiles"
+    ) +
+    theme_minimal(base_size = 14)
+}
+
+# --- Extract the six models ---
+scat_front    <- naive_scatter$frontal
+scat_occip    <- naive_scatter$occipital
+scat_combined <- naive_scatter$combined
+
+ret_front     <- naive_retard$frontal
+ret_occip     <- naive_retard$occipital
+ret_combined  <- naive_retard$combined
+
+# --- Print QQ plots for all models ---
+
+# Scattering models
+print(make_qq_plot(scat_front,    "Scattering — Frontal"))
+print(make_qq_plot(scat_occip,    "Scattering — Occipital"))
+print(make_qq_plot(scat_combined, "Scattering — Combined Regions"))
+
+# Retardance models
+print(make_qq_plot(ret_front,     "Retardance — Frontal"))
+print(make_qq_plot(ret_occip,     "Retardance — Occipital"))
+print(make_qq_plot(ret_combined,  "Retardance — Combined Regions"))
+
+```
+
+## SWP Overview and Goal
+
+The Size-Weighted Proximity (SWP) metric is intended to quantify how strongly each voxel in the parenchyma is influenced by nearby EPVS, accounting for both distance and EPVS size. The question we are looking at is:\
+**How do optical properties change as a function of log(SWP)?**
+
+Our goal within this analysis is not only to visualize the relationship, but also to quantify its shape, assess it strength, and determine whether the relationship appear linear or nonlinear. This helps evaluate whether changes in local tissue microstructure (reflected in optical properties) can be predicted from EPVS proximity and size
+
+```{r}
+
+```
+
 ## Begin SWP Relationship Analysis
 
-A Generalized Additive Model (GAM) is a type of statistical model that allows the relationship between a predictor and an outcome to be non-linear, instead of forcing it to be a straight line.
-
-In a normal linear regression, we assume:
-
--   Every unit increase in X changes the outcome by the same amount.
-
--   The relationship is assumed to be a straight line.
-
-But biological processes often aren’t linear — especially tissue changes in disease.
-
-A GAM replaces the straight line with a smooth curve:
-
-We used a Generalized Additive Model because we expected the relationship between size-weighted proximity (SWP) and the optical properties to be non-linear.\
-
-A GAM allows us to model this relationship flexibly, without forcing it into a straight line or predefined curve.\
-
-This lets the data determine the true shape of how tissue optical properties change as proximity to EPVS increases, while still adjusting for differences between brain regions.
+Here are two figures based on what was presented in the intake meeting. It's clear that there is a non-linear patterns at higher log(SWP) values. Differences between frontal and occipital regions, suggesting a regional effect. In order look further into it we would need to fit a non-linear model. This because using any linear model would underestimate the relationship where it bends upward or downward and provides poor fit. Thus we needed a method that does *not* assume linearity, can adapt to the shape of the data, and still yields interpretable effects and significance tests.
 
 ```{r}
 file <- "op_vs_swp_16-Oct-2025.xlsx"
@@ -357,6 +587,23 @@ ggplot(swp, aes(x = log_swp, y = optical_value, color = region)) +
   labs(title = "Optical Properties vs log(SWP)", y = "Optical Value", x = "log(SWP)")
 ```
 
+A Generalized Additive Model (GAM) is a type of statistical model that allows the relationship between a predictor and an outcome to be non-linear, instead of forcing it to be a straight line.
+
+In a normal linear regression, we assume:
+
+-   Every unit increase in X changes the outcome by the same amount.
+
+-   The relationship is assumed to be a straight line.
+
+But biological processes often aren’t linear — especially tissue changes in disease.
+
+A GAM replaces the straight line with a smooth curve:
+
+We used a Generalized Additive Model because we expected the relationship between size-weighted proximity (SWP) and the optical properties to be non-linear.
+
+A GAM allows us to model this relationship flexibly, without forcing it into a straight line or predefined curve.\
+This lets the data determine the true shape of how tissue optical properties change as proximity to EPVS increases, while still adjusting for differences between brain regions.
+
 ```{r}
 gam_scatter <- gam(optical_value ~ s(log_swp, k = 6) + region,
                    data = filter(swp, property == "scattering"))
@@ -364,6 +611,8 @@ gam_scatter <- gam(optical_value ~ s(log_swp, k = 6) + region,
 gam_retard <- gam(optical_value ~ s(log_swp, k = 6) + region,
                   data = filter(swp, property == "retardance"))
 
+summary(gam_scatter)
+summary(gam_retard)
 par(mfrow=c(1,2))
 plot(gam_scatter, shade = TRUE, main = "Scattering vs SWP")
 plot(gam_retard, shade = TRUE, main = "Retardance vs SWP")
@@ -371,10 +620,9 @@ plot(gam_retard, shade = TRUE, main = "Retardance vs SWP")
 ```
 
 We modeled scattering and retardance as smooth functions of SWP and included region as a fixed effect.\
-In both cases, the smooth term was highly significant, confirming a non-linear relationship between SWP and tissue optical properties. Scattering increases and then decreases as SWP increases, consistent with an early increase in extracellular tissue density followed by late-stage tissue degradation. Retardance decreases and then increases, which suggests initial myelin breakdown, followed by fiber compression or re-packing in more advanced disease. Additionally, both scattering and retardance are higher in the occipital region than in the frontal region, consistent with the known pattern of CAA-related white matter vulnerability. The models is a good fit with the adjusted r-squred value (0.74 and 0.76)
+In both cases, the smooth term was highly significant, confirming a non-linear relationship between SWP and tissue optical properties. Scattering increases and then decreases as SWP increases, consistent with an early increase in extra cellular tissue density followed by late-stage tissue degradation. Retardance decreases and then increases, which suggests initial myelin breakdown, followed by fiber compression or re-packing in more advanced disease. Additionally, both scattering and retardance are higher in the occipital region than in the frontal region, consistent with the known pattern of CAA-related white matter vulnerability. The models is a good fit with the adjusted r-squred value (0.74 and 0.76)
 
 I visualized the relationship between EPVS Size-Weighted Proximity (SWP) and optical properties.\
-
 Both scattering and retardance show non-linear dependence on SWP, so linear models are not appropriate.\
 
 A GAM model captures the shape of the curve, which aligns with the biological interpretation:
