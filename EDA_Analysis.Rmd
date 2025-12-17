@@ -432,25 +432,30 @@ library(knitr)
 library(kableExtra)
 
 
-fit_naive_models <- function(df, property_filter) {
+library(lme4)
+library(lmerTest)
+library(dplyr)
+
+fit_mixed_models <- function(df, property_filter) {
   
   df_prop <- df %>% filter(property == property_filter)
   
-  # Model 1: Frontal only
-  m_front <- lm(
-    OpticalProperty ~ Groups * factor(distance),
+  # Mixed Model 1: Frontal only
+  m_front <- lmer(
+    OpticalProperty ~ Groups * factor(distance) + (1 | subID),
     data = df_prop %>% filter(Region == "front")
   )
   
-  # Model 2: Occipital only
-  m_occip <- lm(
-    OpticalProperty ~ Groups * factor(distance),
+  # Mixed Model 2: Occipital only
+  m_occip <- lmer(
+    OpticalProperty ~ Groups * factor(distance) + (1 | subID),
     data = df_prop %>% filter(Region == "occipital")
   )
   
-  # Model 3: Combined regions (Region as covariate)
-  m_combined <- lm(
-    OpticalProperty ~ Groups * factor(distance) + Region,
+  # Mixed Model 3: Combined regions (nested structure)
+  m_combined <- lmer(
+    OpticalProperty ~ Groups * factor(distance) * Region +
+      (1 | subID) + (1 | subID:Region),
     data = df_prop
   )
   
@@ -461,78 +466,49 @@ fit_naive_models <- function(df, property_filter) {
   )
 }
 
-make_model_table <- function(model, title){
+# Run models
+mixed_scatter <- fit_mixed_models(main_data, "scattering")
+mixed_retard  <- fit_mixed_models(main_data, "retardance")
+
+make_mixed_table <- function(model, title){
   tab <- summary(model)$coefficients %>% 
-    as.data.frame() %>% 
-    mutate(Term = rownames(.)) %>% 
-    select(Term, Estimate = Estimate, Std_Error = `Std. Error`,
+    as.data.frame() %>%
+    mutate(Term = rownames(.)) %>%
+    select(Term, Estimate, Std_Error = `Std. Error`, 
            t_value = `t value`, p_value = `Pr(>|t|)`)
-  
+
   kable(tab, caption = title, digits = 4)
 }
 
-
-
-# Run models
-# Run models
-naive_scatter <- fit_naive_models(main_data, "scattering")
-naive_retard  <- fit_naive_models(main_data, "retardance")
-
-# Produce tables
-make_model_table(naive_scatter$frontal,   "Scattering — Frontal Region (Naïve Model)")
-make_model_table(naive_scatter$occipital, "Scattering — Occipital Region (Naïve Model)")
-make_model_table(naive_scatter$combined,  "Scattering — Combined Regions (Naïve Model)")
-
-make_model_table(naive_retard$frontal,    "Retardance — Frontal Region (Naïve Model)")
-make_model_table(naive_retard$occipital,  "Retardance — Occipital Region (Naïve Model)")
-make_model_table(naive_retard$combined,   "Retardance — Combined Regions (Naïve Model)")
-
-
-summary(naive_scatter$frontal)
-summary(naive_scatter$occipital)
-summary(naive_scatter$retardance)
-summary(naive_scatter$frontal)
-summary(naive_scatter$occipital)
-summary(naive_scatter$combined)
-
-library(ggplot2)
-library(dplyr)
-
-# --- Helper function to make a QQ plot ---
-make_qq_plot <- function(model, title){
-  df <- data.frame(resid = residuals(model))
-  
-  ggplot(df, aes(sample = resid)) +
-    stat_qq(size = 1, alpha = 0.6) +
-    stat_qq_line(color = "red", linewidth = 1) +
-    labs(
-      title = paste("QQ Plot:", title),
-      x = "Theoretical Quantiles",
-      y = "Sample Quantiles"
-    ) +
-    theme_minimal(base_size = 14)
+# Example:
+make_mixed_table(mixed_scatter$frontal,
+                 "Mixed-Effects Model — Scattering (Frontal)")
+plot_qq <- function(model, title){
+  qqnorm(residuals(model), main = title)
+  qqline(residuals(model))
 }
 
-# --- Extract the six models ---
-scat_front    <- naive_scatter$frontal
-scat_occip    <- naive_scatter$occipital
-scat_combined <- naive_scatter$combined
+par(mfrow=c(2,3))
 
-ret_front     <- naive_retard$frontal
-ret_occip     <- naive_retard$occipital
-ret_combined  <- naive_retard$combined
+plot_qq(mixed_scatter$frontal, "QQ: Scattering (Frontal)")
+plot_qq(mixed_scatter$occipital, "QQ: Scattering (Occipital)")
+plot_qq(mixed_scatter$combined, "QQ: Scattering (Combined)")
 
-# --- Print QQ plots for all models ---
+plot_qq(mixed_retard$frontal, "QQ: Retardance (Frontal)")
+plot_qq(mixed_retard$occipital, "QQ: Retardance (Occipital)")
+plot_qq(mixed_retard$combined, "QQ: Retardance (Combined)")
 
-# Scattering models
-print(make_qq_plot(scat_front,    "Scattering — Frontal"))
-print(make_qq_plot(scat_occip,    "Scattering — Occipital"))
-print(make_qq_plot(scat_combined, "Scattering — Combined Regions"))
 
-# Retardance models
-print(make_qq_plot(ret_front,     "Retardance — Frontal"))
-print(make_qq_plot(ret_occip,     "Retardance — Occipital"))
-print(make_qq_plot(ret_combined,  "Retardance — Combined Regions"))
+```
+
+```{r}
+summary(mixed_scatter$frontal)
+summary(mixed_scatter$occipital)
+summary(mixed_scatter$combined)
+
+summary(mixed_retard$frontal)
+summary(mixed_retard$occipital)
+summary(mixed_retard$combined)
 
 ```
 
